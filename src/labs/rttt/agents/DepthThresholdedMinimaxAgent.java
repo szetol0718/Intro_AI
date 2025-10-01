@@ -46,17 +46,51 @@ public class DepthThresholdedMinimaxAgent
         return b.toString();
     }
 
-    public Node minimax(Node node)
-    {
-        // uncomment if you want to see the tree being made
-        // System.out.println(this.getTabs(node) + "Node(currentPlayer=" + node.getCurrentPlayerType() +
-        //      " isTerminal=" + node.isTerminal() + " lastMove=" + node.getLastMove() + ")");
+public Node minimax(Node node)
+{
+    // // uncomment if you want to see the tree being made
+    // System.out.println(this.getTabs(node) + "Node(currentPlayer=" + node.getCurrentPlayerType() +
+    //      " isTerminal=" + node.isTerminal() + " lastMove=" + node.getLastMove() + ")");
 
-        /**
-         * TODO: complete me!
-         */
-        return null;
+    // terminal node case
+    if (node.isTerminal()) {
+        node.setUtilityValue(node.getTerminalUtility());
+        return node;
     }
+
+    // cutoff case(depth limit)
+    if (node.getDepth() >= this.getMaxDepth()) {
+        node.setUtilityValue(Heuristics.calculateHeuristicValue(node));
+        return node;
+    }
+
+    List<Node> children = node.getChildren();
+    if (children.isEmpty()) {
+        node.setUtilityValue(Heuristics.calculateHeuristicValue(node));
+        return node;
+    }
+
+    boolean maximizing = (node.getCurrentPlayerType() == node.getMyPlayerType());
+    double bestVal = maximizing ? Double.NEGATIVE_INFINITY : Double.POSITIVE_INFINITY;
+    Node best = null;
+
+    for (Node child : children) {
+        Node eval = minimax(child);
+        double score = eval.getUtilityValue();
+
+        if (maximizing && score > bestVal) {
+            bestVal = score;
+            best = child;
+        } else if (!maximizing && score < bestVal) {
+            bestVal = score;
+            best = child;
+        }
+    }
+
+    node.setUtilityValue(bestVal);
+    return best;
+}
+
 
     @Override
     public Pair<Coordinate, Coordinate> makeFirstMove(final RecursiveTicTacToeGameView game)
