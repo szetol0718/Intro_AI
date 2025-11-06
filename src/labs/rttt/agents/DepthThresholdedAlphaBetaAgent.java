@@ -58,8 +58,58 @@ public class DepthThresholdedAlphaBetaAgent
         /**
          * TODO: complete me!
          */
-        return null;
+        // Base: terminal or cutoff
+        if (node.isTerminal()) {
+         node.setUtilityValue(node.getTerminalUtility());
+            return node;
+        }
+        if (node.getDepth() >= this.getMaxDepth()) {
+            node.setUtilityValue(Heuristics.calculateHeuristicValue(node));
+            return node;
+        }
+
+        // Order children before exploring
+        List<Node> ordered = MoveOrderer.orderChildren(node.getChildren());
+        if (ordered.isEmpty()) {
+            node.setUtilityValue(Heuristics.calculateHeuristicValue(node));
+            return node;
+        }
+
+        // Decide behavior depending on role
+        boolean isMax = node.getCurrentPlayerType() == this.getMyPlayerType();
+
+        // Fold over children instead of inline max/min
+        Node chosen = null;
+        double value = isMax ? Double.NEGATIVE_INFINITY : Double.POSITIVE_INFINITY;
+
+        for (Node child : ordered) {
+            Node evaluated = alphaBeta(child, alpha, beta);
+            double score = evaluated.getUtilityValue();
+
+            if (isMax) {
+                if (score > value) {
+                 value = score;
+                    chosen = child;
+                }
+                alpha = Math.max(alpha, value);
+            } else {
+                if (score < value) {
+                    value = score;
+                    chosen = child;
+                }
+                beta = Math.min(beta, value);
+            }
+
+            // pruning check happens *after* updating bounds
+            if (alpha >= beta) {
+                break;
+            }
+        }
+
+        node.setUtilityValue(value);
+        return chosen;
     }
+
 
     @Override
     public Pair<Coordinate, Coordinate> makeFirstMove(final RecursiveTicTacToeGameView game)
