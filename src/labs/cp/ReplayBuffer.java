@@ -114,6 +114,57 @@ public class ReplayBuffer
         //      - We want to update any indexing information that we would need to keep the replacementType going
         //          - if there is space left, we need to increment this.getSize()
         //          - if there isn't space left and we have OLDEST replacement, we need to increment this.getNewestSampleIdx
+        int idxToInsert;
+
+        int capacity = this.getPrevStates().getShape().getNumRows();
+
+        // Case 1 — still space available
+        if (this.size() < capacity) {
+            idxToInsert = this.size();
+            this.setSize(this.size() + 1);
+        }
+        else {
+            // Case 2 — buffer full, choose a slot to evict
+            idxToInsert = this.chooseSampleToEvict();
+
+            // update newest index when using OLDEST
+            if (this.getReplacementType() == ReplacementType.OLDEST) {
+                this.setNewestSampleIdx(idxToInsert);
+            }
+        }
+
+        try {
+            // Copy prevState into buffer row
+            this.getPrevStates().copySlice(
+                idxToInsert, idxToInsert + 1,
+                0, this.getPrevStates().getShape().getNumCols(),
+                prevState
+            );
+
+            // Insert reward
+            this.getRewards().set(idxToInsert, 0, reward);
+
+            // Insert nextState or terminal mask
+            if (nextState == null) {
+                this.getIsStateTerminalMask()[idxToInsert] = true;
+            } else {
+                this.getIsStateTerminalMask()[idxToInsert] = false;
+                this.getNextStates().copySlice(
+                    idxToInsert, idxToInsert + 1,
+                    0, this.getNextStates().getShape().getNumCols(),
+                    nextState
+                );
+            }
+
+            // Track newest index always
+            this.setNewestSampleIdx(idxToInsert);
+
+        } catch (Exception e) {
+            System.err.println("ReplayBuffer.addSample error");
+            e.printStackTrace();
+            System.exit(-1);
+        }
+    
     }
 
     public static double max(Matrix qValues) throws IndexOutOfBoundsException
@@ -158,9 +209,35 @@ public class ReplayBuffer
         // number of transitions currently stored in the ReplayBuffer. Each row corresponds to a transition
         // which could either be (s, r, s') or (s, r, null), so when calculating the bellman update for that row,
         // you need to check the mask to see which version you're calculating! 
+        Matrix Y = Matrix.zeros(this.size(), 1);
 
+        try {
+            for (int i = 0; i < this.size(); i++) {
 
-        return null;
+                double R = this.getRewards().get(i, 0);
+
+                if (this.getIsStateTerminalMask()[i]) {
+                    // terminal transition → Bellman target = R
+                    Y.set(i, 0, R);
+                }
+                else {
+                    // non-terminal → R + γ max_a' Q(s',a')
+                    Matrix nextS = this.getNextStates().getRow(i);
+                    Matrix qVals = qFunction.forward(nextS);
+
+                    double maxNext = max(qVals);
+                    double target = R + discountFactor * maxNext;
+
+                    Y.set(i, 0, target);
+                }
+            }
+
+        } catch (Exception e) {
+            System.err.println("ReplayBuffer.getGroundTruth error");
+            e.printStackTrace();
+            System.exit(-1);
+        }
+        return Y;
     }
 
     public Pair<Matrix, Matrix> getTrainingData(Model qFunction,
