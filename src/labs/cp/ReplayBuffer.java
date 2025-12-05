@@ -118,13 +118,13 @@ public class ReplayBuffer
 
         int capacity = this.getPrevStates().getShape().getNumRows();
 
-        // Case 1 — still space available
+        // Case 1  still space available
         if (this.size() < capacity) {
             idxToInsert = this.size();
             this.setSize(this.size() + 1);
         }
         else {
-            // Case 2 — buffer full, choose a slot to evict
+            // Case 2  buffer full, choose a slot to evict
             idxToInsert = this.chooseSampleToEvict();
 
             // update newest index when using OLDEST
@@ -217,11 +217,11 @@ public class ReplayBuffer
                 double R = this.getRewards().get(i, 0);
 
                 if (this.getIsStateTerminalMask()[i]) {
-                    // terminal transition → Bellman target = R
+                    // terminal transition  Bellman target = R
                     Y.set(i, 0, R);
                 }
                 else {
-                    // non-terminal → R + γ max_a' Q(s',a')
+                    // non-terminal  R + γ max_a' Q(s',a')
                     Matrix nextS = this.getNextStates().getRow(i);
                     Matrix qVals = qFunction.forward(nextS);
 

@@ -99,8 +99,45 @@ public class Main
             // TODO: complete me!
             // play a bunch of training games where you are not allowed to update the neural network
             // make sure to add transitions that you observe to the replay buffer, including the terminal transition!
+            // reset the environment to begin a new episode
+            Matrix state = game.reset();
+            boolean isDone = false;
+
+            while (!isDone)
+            {
+                int action = 0;
+
+                // choose action using the current qFunction (no learning here)
+                try {
+                    Matrix qValues = qFunction.forward(state);
+                    action = argmax(qValues);
+                } catch (Exception e) {
+                    System.err.println("Main.train: error using qFunction");
+                    e.printStackTrace();
+                    action = game.getRandom().nextInt(2); // fallback random action
+                }
+
+                // step the environment
+                Triple<Matrix, Double, Boolean> obs = game.step(action);
+
+                Matrix nextState = obs.getFirst();
+                double reward = obs.getSecond();
+                isDone = obs.getThird();
+
+                // add (state, reward, nextState) into replay buffer
+                rb.addSample(state, reward, nextState);
+
+                // move to next state
+                state = nextState;
+            }
+
+            // Add terminal transition (state, reward, null)
+            // The game has already reached a terminal nextState,
+            // but the last "nextState" returned is null, so we must explicitly insert:
+            rb.addSample(state, 0.0, null);
         }
     }
+    
 
     public static void update(Model qFunction,      // neural network
                               Optimizer opt,        // SGD or Adam in this implementation
