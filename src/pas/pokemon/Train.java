@@ -11,318 +11,344 @@ import java.util.Random;
 import net.sourceforge.argparse4j.ArgumentParsers;
 import net.sourceforge.argparse4j.inf.ArgumentParser;
 import net.sourceforge.argparse4j.inf.Namespace;
-import src.pas.pokemon.agents.PolicyAgent;
-// JAVA PROJECT IMPORTS
+
+// FRAMEWORK IMPORTS
 import edu.bu.pas.pokemon.agents.NeuralQAgent;
 import edu.bu.pas.pokemon.agents.rewards.RewardFunction;
+import edu.bu.pas.pokemon.agents.rewards.RewardFunction.RewardType;
 import edu.bu.pas.pokemon.core.Agent;
 import edu.bu.pas.pokemon.core.Battle;
-import edu.bu.pas.pokemon.core.Battle.BattleView;
 import edu.bu.pas.pokemon.core.Move;
-import edu.bu.pas.pokemon.core.Move.MoveView;
-import edu.bu.pas.pokemon.core.Pokemon.PokemonView; // Import PokemonView
-import edu.bu.pas.pokemon.core.Team.TeamView;       // Import TeamView
+import edu.bu.pas.pokemon.core.Team;
+import edu.bu.pas.pokemon.core.Pokemon;
+import edu.bu.pas.pokemon.core.Battle.BattleView;
 import edu.bu.pas.pokemon.generators.BattleCreator;
-import edu.bu.pas.pokemon.training.data.Dataset;
-import edu.bu.pas.pokemon.training.data.ReplacementType;
-import edu.bu.pas.pokemon.training.data.ReplayBuffer;
+
 import edu.bu.pas.pokemon.linalg.Matrix;
 import edu.bu.pas.pokemon.nn.LossFunction;
 import edu.bu.pas.pokemon.nn.Model;
 import edu.bu.pas.pokemon.nn.Optimizer;
 import edu.bu.pas.pokemon.nn.losses.MeanSquaredError;
 import edu.bu.pas.pokemon.nn.optimizers.*;
-import edu.bu.pas.pokemon.utils.Pair; 
+import edu.bu.pas.pokemon.training.data.Dataset;
+import edu.bu.pas.pokemon.training.data.ReplacementType;
+import edu.bu.pas.pokemon.training.data.ReplayBuffer;
+import edu.bu.pas.pokemon.utils.Pair;
+import edu.bu.pas.pokemon.utils.Triple;
 
-public class Train extends Object {
+public class Train {
 
-    public static Agent getAgent(String agentClassName) {
-        Agent agent = null;
+    /* ===========================
+       Utility helpers
+       =========================== */
+
+    private static Agent instantiate(String className) {
         try {
-            Class<?> clazz = Class.forName(agentClassName);
-            Constructor<?> constructor = clazz.getConstructor();
-            agent = (Agent) constructor.newInstance();
+            Class<?> c = Class.forName(className);
+            return (Agent) c.getConstructor().newInstance();
         } catch (Exception e) {
-            System.err.println("[ERROR] Train.getAgent: error when instantiating " + agentClassName);
+            System.err.println("[Train] Could not instantiate agent: " + className);
             e.printStackTrace();
-            System.exit(-1);
+            System.exit(1);
         }
-        return agent;
+        return null;
     }
 
-    public static RewardFunction getRewardFunction() {
-        RewardFunction rewardFunction = null;
+    private static RewardFunction loadRewardFunction() {
         try {
-            Class<?> clazz = Class.forName("src.pas.pokemon.rewards.CustomRewardFunction");
-            Constructor<?> constructor = clazz.getConstructor();
-            rewardFunction = (RewardFunction) constructor.newInstance();
+            Class<?> c = Class.forName("src.pas.pokemon.rewards.CustomRewardFunction");
+            return (RewardFunction) c.getConstructor().newInstance();
         } catch (Exception e) {
-            System.err.println("[ERROR] Train.getRewardFunction: error instantiating CustomRewardFunction");
+            System.err.println("[Train] Failed to load CustomRewardFunction");
             e.printStackTrace();
-            System.exit(-1);
+            System.exit(1);
         }
-        return rewardFunction;
+        return null;
     }
 
-    public static Pair<Optimizer, LossFunction> getModelAdjustmentInfrastructure(Namespace args, Model model) {
-        final double lr = args.get("lr");
-        final double clipValue = args.get("clip");
+    private static Pair<Optimizer, LossFunction> buildTrainer(Namespace ns, Model model) {
+        double lr   = ns.get("lr");
+        double clip = ns.get("clip");
 
-        Optimizer optim = null;
-        if (args.get("optimizerType").equals("sgd")) {
-            optim = new SGDOptimizer(model.getParameters(), lr, -clipValue, +clipValue);
-        } else if (args.get("optimizerType").equals("adam")) {
-            optim = new AdamOptimizer(model.getParameters(), lr, args.get("beta1"), args.get("beta2"), -clipValue, +clipValue);
-        } else {
-            System.err.println("[ERROR] Unknown optimizer type " + args.get("optimizerType"));
-            System.exit(-1);
+        Optimizer opt;
+        switch (ns.get("optimizerType")) {
+            case "sgd":
+                opt = new SGDOptimizer(model.getParameters(), lr, -clip, clip);
+                break;
+            case "adam":
+                opt = new AdamOptimizer(
+                        model.getParameters(), lr,
+                        ns.get("beta1"), ns.get("beta2"),
+                        -clip, clip
+                );
+                break;
+            default:
+                throw new RuntimeException("Unknown optimizer type");
         }
-        LossFunction lossFunction = new MeanSquaredError();
-        return new Pair<>(optim, lossFunction);
+        return new Pair<>(opt, new MeanSquaredError());
     }
 
-    public static void playTrainingGames(NeuralQAgent agent, List<Agent> enemyAgents, ReplayBuffer buffer, Namespace args, Random rng) {
-        final long numTrainingGames = args.get("numTrainingGames");
+    /* ===========================
+       Training episode generation
+       =========================== */
 
-        try {
-            for (int gameIdx = 0; gameIdx < numTrainingGames; ++gameIdx) {
-                for (Agent enemyAgent : enemyAgents) {
-                    Battle battle = BattleCreator.makeRandomTeams(6, 6, 4, rng, agent, enemyAgent);
+    private static void runTrainingEpisodes(
+            NeuralQAgent agent,
+            List<Agent> enemies,
+            ReplayBuffer buffer,
+            Namespace ns,
+            Random rng
+    ) {
+        long totalGames = ns.get("numTrainingGames");
 
-                    try {
-                        BattleView oldView = null;
-                        MoveView oldAction = null;
-                        boolean isGameOver = false;
+        for (int g = 0; g < totalGames; g++) {
+            for (Agent opp : enemies) {
+                try {
+                    Battle battle = BattleCreator.makeRandomTeams(
+                            6, 6, 4, rng, agent, opp
+                    );
 
-                        while (!isGameOver) {
-                            battle.nextTurn();
-                            battle.applyPreTurnConditions();
+                    BattleView prevView = null;
+                    MoveView prevAction = null;
 
-                            BattleView newView = battle.getView();
-                            Pair<Move, Move> moves = battle.getMoves();
-                            MoveView action = moves.getFirst().getView();
-                            battle.applyMoves(moves);
-                            battle.applyPostTurnConditions();
+                    while (!battle.isOver()) {
+                        battle.nextTurn();
+                        battle.applyPreTurnConditions();
 
-                            newView = battle.getView();
-                            isGameOver = battle.isOver();
+                        BattleView curView = battle.getView();
+                        Pair<Move, Move> moves = battle.getMoves();
+                        MoveView a = moves.getFirst().getView();
 
-                            if (oldView != null) {
-                                buffer.addSample(oldView, oldAction, newView);
-                            }
+                        battle.applyMoves(moves);
+                        battle.applyPostTurnConditions();
 
-                            oldView = newView;
-                            oldAction = action;
+                        BattleView nextView = battle.getView();
+
+                        if (prevView != null) {
+                            buffer.addSample(prevView, prevAction, nextView);
                         }
 
-                        agent.afterGameEnds(battle.getView());
-                        enemyAgent.afterGameEnds(battle.getView());
-                        
-                        buffer.addSample(oldView, oldAction, battle.getView());
-
-                    } catch (Exception e) {
-                        e.printStackTrace();
+                        prevView   = nextView;
+                        prevAction = a;
                     }
+
+                    // wrap final transition
+                    buffer.addSample(prevView, prevAction, battle.getView());
+
+                    agent.afterGameEnds(battle.getView());
+                    opp.afterGameEnds(battle.getView());
+
+                } catch (Exception ex) {
+                    System.err.println("[Train] Training episode error");
+                    ex.printStackTrace();
                 }
             }
-        } catch (IOException e) {
-            e.printStackTrace();
         }
     }
 
-    public static void update(NeuralQAgent agent, Optimizer optim, LossFunction lossFunction, ReplayBuffer replayBuffer, RewardFunction rewardFunction, Namespace args, Random rng) {
-        double discountFactor = args.get("gamma");
-        int batchSize = args.get("miniBatchSize");
-        int numUpdates = args.get("numUpdates");
+    /* ===========================
+       Model update loop (Q-Learning)
+       =========================== */
 
-        Dataset dataset = replayBuffer.toDataset(agent, discountFactor, rewardFunction);
+    private static void updateQFunction(
+            NeuralQAgent agent,
+            Optimizer opt,
+            LossFunction loss,
+            ReplayBuffer buffer,
+            RewardFunction reward,
+            Namespace ns,
+            Random rng
+    ) {
+        int epochs    = ns.get("numUpdates");
+        int batchSize = ns.get("miniBatchSize");
+        double gamma  = ns.get("gamma");
 
-        for (int epochIdx = 0; epochIdx < numUpdates; ++epochIdx) {
-            dataset.shuffle();
-            Dataset.BatchIterator it = dataset.iterator(batchSize);
+        Dataset data = buffer.toDataset(agent, gamma, reward);
+
+        for (int ep = 0; ep < epochs; ep++) {
+            data.shuffle();
+            Dataset.BatchIterator it = data.iterator(batchSize);
+
             while (it.hasNext()) {
                 Pair<Matrix, Matrix> batch = it.next();
+
                 try {
-                    Matrix YHat = agent.getModel().forward(batch.getFirst());
-                    optim.reset();
-                    agent.getModel().backwards(batch.getFirst(), lossFunction.backwards(YHat, batch.getSecond()));
-                    optim.step();
+                    Matrix preds = agent.getModel().forward(batch.getFirst());
+                    Matrix grads = loss.backwards(preds, batch.getSecond());
+
+                    opt.reset();
+                    agent.getModel().backwards(batch.getFirst(), grads);
+                    opt.step();
                 } catch (Exception e) {
+                    System.err.println("[Train] Backprop failed");
                     e.printStackTrace();
-                    System.exit(-1);
+                    System.exit(1);
                 }
             }
         }
     }
 
-    public static Pair<Double, Double> playEvalGames(NeuralQAgent agent, List<Agent> enemyAgents, RewardFunction rewardFunction, Namespace args, Random rng) {
-        final long numEvalGames = args.get("numEvalGames");
-        final double discountFactor = args.get("gamma");
+    /* ===========================
+       Evaluation Phase
+       =========================== */
 
-        double trajectoryUtilitySum = 0;
-        double numWins = 0;
+    private static Pair<Double, Double> evaluate(
+            NeuralQAgent agent,
+            List<Agent> enemies,
+            RewardFunction rewardFn,
+            Namespace ns,
+            Random rng
+    ) {
+        long rounds = ns.get("numEvalGames");
+        double gamma = ns.get("gamma");
 
-        try {
-            for (int gameIdx = 0; gameIdx < numEvalGames; ++gameIdx) {
-                for (Agent enemyAgent : enemyAgents) {
-                    double trajectoryUtility = 0;
-                    Battle battle = BattleCreator.makeRandomTeams(6, 6, 4, rng, agent, enemyAgent);
+        double utilSum = 0.0;
+        double wins = 0.0;
 
-                    try {
-                        BattleView oldView = null;
-                        MoveView oldAction = null;
-                        boolean isGameOver = false;
-                        int t = 0;
-                        while (!isGameOver) {
-                            battle.nextTurn();
-                            battle.applyPreTurnConditions();
-                            BattleView newView = battle.getView();
-                            Pair<Move, Move> moves = battle.getMoves();
-                            MoveView action = moves.getFirst().getView();
-                            battle.applyMoves(moves);
-                            battle.applyPostTurnConditions();
-                            newView = battle.getView();
-                            isGameOver = battle.isOver();
+        for (int r = 0; r < rounds; r++) {
+            for (Agent opp : enemies) {
 
-                            if (oldView != null) {
-                                double reward = 0d;
-                                switch (rewardFunction.getType()) {
-                                    case STATE: reward = rewardFunction.getStateReward(oldView); break;
-                                    case STATE_ACTION: reward = rewardFunction.getStateActionReward(oldView, oldAction); break;
-                                    case STATE_ACTION_STATE: reward = rewardFunction.getStateActionStateReward(oldView, oldAction, newView); break;
-                                }
-                                trajectoryUtility += Math.pow(discountFactor, t) * reward;
-                                t += 1;
-                            }
-                            oldView = newView;
-                            oldAction = action;
-                        }
+                double utility = 0.0;
+                int t = 0;
 
-                        agent.afterGameEnds(battle.getView());
-                        enemyAgent.afterGameEnds(battle.getView());
+                Battle battle = BattleCreator.makeRandomTeams(6, 6, 4, rng, agent, opp);
 
-                        double reward = 0d;
-                        switch (rewardFunction.getType()) {
-                            case STATE: reward = rewardFunction.getStateReward(oldView); break;
-                            case STATE_ACTION: reward = rewardFunction.getStateActionReward(oldView, oldAction); break;
-                            case STATE_ACTION_STATE: reward = rewardFunction.getStateActionStateReward(oldView, oldAction, battle.getView()); break;
-                        }
-                        trajectoryUtility += Math.pow(discountFactor, t) * reward;
-                        trajectoryUtilitySum += trajectoryUtility;
+                BattleView prevView = null;
+                MoveView prevAction = null;
 
-                        // FIX: Use Views instead of raw Team objects to avoid import errors
-                        if (didTeamWin(battle.getView().getTeam1View(), battle.getView().getTeam2View())) {
-                            numWins += 1;
-                        }
+                while (!battle.isOver()) {
+                    battle.nextTurn();
+                    battle.applyPreTurnConditions();
 
-                    } catch (Exception e) {
-                        e.printStackTrace();
+                    BattleView cur = battle.getView();
+                    Pair<Move, Move> moves = battle.getMoves();
+                    MoveView action = moves.getFirst().getView();
+
+                    battle.applyMoves(moves);
+                    battle.applyPostTurnConditions();
+
+                    BattleView next = battle.getView();
+
+                    if (prevView != null) {
+                        double rwd = rewardFn.getStateActionStateReward(prevView, prevAction, next);
+                        utility += Math.pow(gamma, t) * rwd;
+                        t++;
                     }
+
+                    prevView = next;
+                    prevAction = action;
                 }
+
+                // final reward
+                double finalReward =
+                        rewardFn.getStateActionStateReward(prevView, prevAction, battle.getView());
+                utility += Math.pow(gamma, t) * finalReward;
+
+                utilSum += utility;
+
+                // determine winner
+                boolean oursAlive = battle.getTeam1().getPokemon().stream()
+                        .anyMatch(p -> !p.hasFainted());
+                boolean theirsAlive = battle.getTeam2().getPokemon().stream()
+                        .anyMatch(p -> !p.hasFainted());
+
+                if (oursAlive && !theirsAlive) wins++;
             }
-        } catch (IOException e) {
-            e.printStackTrace();
         }
 
-        return new Pair<>(trajectoryUtilitySum / numEvalGames, numWins / numEvalGames);
-    }
-    
-    // FIX: Changed parameters to TeamView
-    private static boolean didTeamWin(TeamView t1, TeamView t2) {
-        boolean t1Alive = false;
-        // TeamView uses .size() and .getPokemonView()
-        for(int i = 0; i < t1.size(); i++) {
-            PokemonView p = t1.getPokemonView(i);
-            if (p != null && !p.hasFainted()) t1Alive = true;
-        }
-        
-        boolean t2Alive = false;
-        for(int i = 0; i < t2.size(); i++) {
-            PokemonView p = t2.getPokemonView(i);
-            if (p != null && !p.hasFainted()) t2Alive = true;
-        }
-        
-        return t1Alive && !t2Alive;
+        return new Pair<>(utilSum / rounds, wins / rounds);
     }
 
-    public static void main(String[] args) {
-        PrintStream out = System.out;
-        System.setOut(new PrintStream(out) {
-            public void println(String message) {}
-            public void print(String message) {}
+    /* ===========================
+       Main training driver
+       =========================== */
+
+    public static void main(String[] args)
+    {
+        // silence engine spam (but keep error logs)
+        PrintStream realOut = System.out;
+        System.setOut(new PrintStream(realOut) {
+            @Override public void println(String msg) {}
+            @Override public void print(String msg) {}
         });
 
         ArgumentParser parser = ArgumentParsers.newFor("Train").build()
-            .defaultHelp(true).description("Train a NeuralQAgent");
+                .defaultHelp(true)
+                .description("Train a Neural Q-Agent in Pokémon RL.");
 
-        parser.addArgument("enemyAgents").nargs("*").help("List of enemy agent classpaths");
+        parser.addArgument("enemyAgents").nargs("*");
 
-        // TUNED DEFAULTS
-        parser.addArgument("-p", "--numCycles").type(Long.class).setDefault(100l); 
-        parser.addArgument("-t", "--numTrainingGames").type(Long.class).setDefault(500l); 
-        parser.addArgument("-v", "--numEvalGames").type(Long.class).setDefault(20l);
-        parser.addArgument("-b", "--maxBufferSize").type(Integer.class).setDefault(50000); 
-        parser.addArgument("-r", "--replacementType").type(ReplacementType.class).setDefault(ReplacementType.RANDOM);
-        parser.addArgument("-u", "--numUpdates").type(Integer.class).setDefault(10); 
-        parser.addArgument("-m", "--miniBatchSize").type(Integer.class).setDefault(32); 
-        parser.addArgument("-n", "--lr").type(Double.class).setDefault(1e-4); 
-        parser.addArgument("-c", "--clip").type(Double.class).setDefault(100d);
-        parser.addArgument("-d", "--optimizerType").type(String.class).setDefault("adam");
-        parser.addArgument("-b1", "--beta1").type(Double.class).setDefault(0.9);
-        parser.addArgument("-b2", "--beta2").type(Double.class).setDefault(0.999);
-        parser.addArgument("-g", "--gamma").type(Double.class).setDefault(0.95); 
+        parser.addArgument("-p","--numCycles").type(Long.class).setDefault(1L);
+        parser.addArgument("-t","--numTrainingGames").type(Long.class).setDefault(10L);
+        parser.addArgument("-v","--numEvalGames").type(Long.class).setDefault(5L);
 
-        parser.addArgument("-i", "--inFile").type(String.class).setDefault("");
-        parser.addArgument("-o", "--outFile").type(String.class).setDefault("./params/qFunction");
-        parser.addArgument("--outOffset").type(Long.class).setDefault(1l);
-        parser.addArgument("--seed").type(Long.class).setDefault(-1l);
+        parser.addArgument("-b","--maxBufferSize").type(Integer.class).setDefault(1280);
+        parser.addArgument("-r","--replacementType").type(ReplacementType.class)
+                .setDefault(ReplacementType.RANDOM);
+
+        parser.addArgument("-u","--numUpdates").type(Integer.class).setDefault(1);
+        parser.addArgument("-m","--miniBatchSize").type(Integer.class).setDefault(128);
+        parser.addArgument("-n","--lr").type(Double.class).setDefault(1e-6);
+        parser.addArgument("-c","--clip").type(Double.class).setDefault(100d);
+        parser.addArgument("-d","--optimizerType").type(String.class).setDefault("sgd");
+        parser.addArgument("-b1","--beta1").type(Double.class).setDefault(0.9);
+        parser.addArgument("-b2","--beta2").type(Double.class).setDefault(0.999);
+
+        parser.addArgument("-g","--gamma").type(Double.class).setDefault(1e-4);
+
+        parser.addArgument("-i","--inFile").type(String.class).setDefault("");
+        parser.addArgument("-o","--outFile").type(String.class).setDefault("./params/qFunction");
+        parser.addArgument("--outOffset").type(Long.class).setDefault(1L);
+
+        parser.addArgument("--seed").type(Long.class).setDefault(-1L);
 
         Namespace ns = parser.parseArgsOrFail(args);
-        final long numCycles = ns.get("numCycles");
-        final long seed = ns.get("seed");
-        String checkpointFileBase = ns.get("outFile");
-        long offset = ns.get("outOffset");
-        Random rng = new Random(seed);
 
-        NeuralQAgent agent = (NeuralQAgent) getAgent("src.pas.pokemon.agents.PolicyAgent");
+        Random rng = new Random(ns.get("seed"));
+
+        NeuralQAgent agent =
+                (NeuralQAgent) instantiate("src.pas.pokemon.agents.PolicyAgent");
         agent.initialize(ns);
-        RewardFunction rewardFunction = getRewardFunction();
 
-        List<Agent> enemyAgents = new LinkedList<>();
-        List<String> enemyAgentClassPaths = ns.get("enemyAgents");
-        if (enemyAgentClassPaths.size() == 0) {
-            System.err.println("[ERROR] Train.main: need to specify at least one enemy agent!");
-            System.exit(1);
-        } else {
-            for (String classPath : enemyAgentClassPaths) {
-                Agent enemyAgent = getAgent(classPath);
-                enemyAgent.initialize(ns);
-                enemyAgents.add(enemyAgent);
-            }
+        RewardFunction rewardFn = loadRewardFunction();
+
+        // load enemies
+        List<Agent> enemies = new LinkedList<>();
+        for (String cp : ns.get("enemyAgents")) {
+            Agent e = instantiate(cp);
+            e.initialize(ns);
+            enemies.add(e);
         }
 
-        Pair<Optimizer, LossFunction> adjustmentPair = getModelAdjustmentInfrastructure(ns, agent.getModel());
-        Optimizer optim = adjustmentPair.getFirst();
-        LossFunction lossFunction = adjustmentPair.getSecond();
-        ReplayBuffer replayBuffer = new ReplayBuffer(ns.get("replacementType"), ns.get("maxBufferSize"), rng);
+        Pair<Optimizer, LossFunction> trainCore =
+                buildTrainer(ns, agent.getModel());
 
-        for (int cycleIdx = 0; cycleIdx < numCycles; ++cycleIdx) {
-            // FIX: Explicit CAST to PolicyAgent to access .train()
-            if (agent instanceof PolicyAgent) {
-                ((PolicyAgent) agent).train();
-            }
+        ReplayBuffer buffer = new ReplayBuffer(
+                ns.get("replacementType"),
+                ns.get("maxBufferSize"),
+                rng
+        );
 
-            playTrainingGames(agent, enemyAgents, replayBuffer, ns, rng);
-            update(agent, optim, lossFunction, replayBuffer, rewardFunction, ns, rng);
-            agent.getModel().save(checkpointFileBase + (cycleIdx + offset) + ".model");
+        long cycles = ns.get("numCycles");
+        String outFileBase = ns.get("outFile");
+        long offset = ns.get("outOffset");
 
-            // FIX: Explicit CAST to PolicyAgent to access .eval()
-            if (agent instanceof PolicyAgent) {
-                ((PolicyAgent) agent).eval();
-            }
-            
-            Pair<Double, Double> statsPair = playEvalGames(agent, enemyAgents, rewardFunction, ns, rng);
-            out.println("Cycle " + cycleIdx + " | Avg Utility: " + String.format("%.2f", statsPair.getFirst()) + " | Win Rate: " + String.format("%.2f", statsPair.getSecond()));
+        for (int c = 0; c < cycles; c++) {
+
+            agent.train();
+            runTrainingEpisodes(agent, enemies, buffer, ns, rng);
+
+            updateQFunction(agent, trainCore.getFirst(), trainCore.getSecond(),
+                    buffer, rewardFn, ns, rng);
+
+            agent.getModel().save(outFileBase + (c + offset) + ".model");
+
+            agent.eval();
+            Pair<Double, Double> stats = evaluate(agent, enemies, rewardFn, ns, rng);
+
+            realOut.println("cycle=" + c +
+                    " avgReturn=" + stats.getFirst() +
+                    " winRate=" + stats.getSecond());
         }
     }
 }
