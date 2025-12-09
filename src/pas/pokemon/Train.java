@@ -1,4 +1,4 @@
-package src.pas.pokemon.agents;
+package src.pas.pokemon;
 
 // SYSTEM IMPORTS
 import java.io.IOException;
@@ -11,7 +11,7 @@ import java.util.Random;
 import net.sourceforge.argparse4j.ArgumentParsers;
 import net.sourceforge.argparse4j.inf.ArgumentParser;
 import net.sourceforge.argparse4j.inf.Namespace;
-
+import src.pas.pokemon.agents.PolicyAgent;
 // JAVA PROJECT IMPORTS
 import edu.bu.pas.pokemon.agents.NeuralQAgent;
 import edu.bu.pas.pokemon.agents.rewards.RewardFunction;
@@ -32,10 +32,7 @@ import edu.bu.pas.pokemon.nn.Model;
 import edu.bu.pas.pokemon.nn.Optimizer;
 import edu.bu.pas.pokemon.nn.losses.MeanSquaredError;
 import edu.bu.pas.pokemon.nn.optimizers.*;
-import edu.bu.pas.pokemon.utils.Pair;
-
-// IMPORT YOUR AGENT SO WE CAN CAST TO IT
-import src.pas.pokemon.agents.PolicyAgent; 
+import edu.bu.pas.pokemon.utils.Pair; 
 
 public class Train extends Object {
 

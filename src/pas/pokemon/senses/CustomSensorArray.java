@@ -6,8 +6,8 @@ import java.util.List;
 
 // JAVA PROJECT IMPORTS
 import edu.bu.pas.pokemon.agents.senses.SensorArray;
-import edu.bu.pas.pokemon.core.Move;
 import edu.bu.pas.pokemon.core.Battle.BattleView;
+import edu.bu.pas.pokemon.core.Move;
 import edu.bu.pas.pokemon.core.Move.MoveView;
 import edu.bu.pas.pokemon.core.Pokemon.PokemonView;
 import edu.bu.pas.pokemon.core.Team.TeamView;
@@ -16,83 +16,42 @@ import src.pas.pokemon.agents.PolicyAgent;
 import edu.bu.pas.pokemon.core.enums.Type;
 import edu.bu.pas.pokemon.core.enums.Stat;
 import edu.bu.pas.pokemon.core.enums.NonVolatileStatus;
+import edu.bu.pas.pokemon.core.enums.Flag;
+import edu.bu.pas.pokemon.core.enums.Height;
 
 public class CustomSensorArray extends SensorArray {
 
     private PolicyAgent agent;
-    private int numFeatures; // <--- Re-added this field!
+    private int numFeatures;
 
     public CustomSensorArray(PolicyAgent agent) {
         this.agent = agent;
         this.numFeatures = 0;
     }
     
-    // Required so PolicyAgent knows how large the input layer should be
-    public int getNumFeatures() {
-        return this.numFeatures;
-    }
+    public int getNumFeatures() { return this.numFeatures; }
 
-    /**
-     * Converts the game state + a potential move into a vector of numbers (0.0 to 1.0).
-     * The Neural Network uses this vector to predict "Q" (How good is this move?).
-     */
     @Override
     public Matrix getSensorValues(final BattleView state, final MoveView action) {
         List<Double> features = new ArrayList<>();
 
-        TeamView myTeam = agent.getMyTeamView(state);
-        TeamView enemyTeam = agent.getOpponentTeamView(state);
-        PokemonView me = myTeam.getActivePokemonView();
-        PokemonView enemy = enemyTeam.getActivePokemonView();
+        // 1. POKEMON STATES (My Active & Their Active)
+        addPokemonState(features, state.getTeam1View().getActivePokemonView());
+        addPokemonState(features, state.getTeam2View().getActivePokemonView());
+        
+        // 2. MOVE ATTRIBUTES
+        addMoveFeatures(features, state, action);
+        
+        // 3. TEAM STATES (Bench health, Screens)
+        addTeamFeatures(features, state.getTeam1View());
+        addTeamFeatures(features, state.getTeam2View());
 
-        // --- 1. HEALTH (0.0 to 1.0) ---
-        features.add(getHPRatio(me)); 
-        features.add(getHPRatio(enemy));
+        // 4. BATTLE STATE
+        addBattleFeatures(features, state);
 
-        // --- 2. MATCHUP STATS (Ratios) ---
-        features.add(getStatRatio(me, enemy, Stat.ATK, Stat.DEF));       // Physical Matchup
-        features.add(getStatRatio(me, enemy, Stat.SPATK, Stat.SPDEF));   // Special Matchup
-        features.add(getStatRatio(me, enemy, Stat.SPD, Stat.SPD));       // Speed Matchup
-
-        // --- 3. STATUS CONDITIONS ---
-        addStatusFeatures(features, me);
-        addStatusFeatures(features, enemy);
-
-        // --- 4. MOVE ATTRIBUTES ---
-        if (action != null) {
-            // Power: Normalize (Max power ~150)
-            features.add(action.getPower() != null ? action.getPower() / 150.0 : 0.0);
-            
-            // Accuracy: 0 to 1
-            features.add(action.getAccuracy() != null ? action.getAccuracy() / 100.0 : 1.0);
-
-            // Priority: Normalize (+1 is good)
-            features.add((double) action.getPriority());
-
-            // Type Effectiveness: Normalize (4.0 -> 1.0)
-            double effectiveness = 1.0;
-            if (enemy != null) {
-                effectiveness = calculateTypeEffectiveness(action.getType(), enemy.getCurrentType1(), enemy.getCurrentType2());
-            }
-            features.add(effectiveness / 4.0); 
-
-            // STAB
-            boolean isStab = (action.getType() == me.getCurrentType1() || action.getType() == me.getCurrentType2());
-            features.add(isStab ? 1.0 : 0.0);
-            
-            // Category
-            features.add(action.getCategory() == Move.Category.PHYSICAL ? 1.0 : 0.0);
-            features.add(action.getCategory() == Move.Category.SPECIAL ? 1.0 : 0.0);
-            features.add(action.getCategory() == Move.Category.STATUS ? 1.0 : 0.0);
-        } else {
-            // Padding for null actions (e.g. switching)
-            for(int i=0; i<8; i++) features.add(0.0);
-        }
-
-        // Update the feature count
+        // Update feature count
         this.numFeatures = features.size();
 
-        // Convert List -> Matrix
         Matrix rowVector = Matrix.zeros(1, features.size());
         for (int i = 0; i < features.size(); i++) {
             rowVector.set(0, i, features.get(i));
@@ -100,41 +59,123 @@ public class CustomSensorArray extends SensorArray {
         return rowVector;
     }
 
-    // --- HELPERS ---
-
-    private double getHPRatio(PokemonView p) {
-        if (p == null || p.getInitialStat(Stat.HP) == 0) return 0.0;
-        return (double) p.getCurrentStat(Stat.HP) / p.getInitialStat(Stat.HP);
-    }
-
-    private double getStatRatio(PokemonView me, PokemonView enemy, Stat myStat, Stat enemyStat) {
-        if (me == null || enemy == null) return 0.5;
-
-        double val1 = me.getCurrentStat(myStat);
-        double val2 = enemy.getCurrentStat(enemyStat);
-
-        if (val2 == 0) return 1.0; 
-        
-        double ratio = val1 / val2;
-        // Clamp between 0.0 and 2.0 to prevent exploding values
-        return Math.min(2.0, Math.max(0.0, ratio)); 
-    }
-
-    private void addStatusFeatures(List<Double> features, PokemonView p) {
-        if (p == null) {
-            for(int i=0; i<3; i++) features.add(0.0);
+    private void addPokemonState(List<Double> features, PokemonView pokemon) {
+        if (pokemon == null) {
+            // Pad with 0s if pokemon is null (45 features per pokemon)
+            for(int i = 0; i < 45; i++) features.add(0.0);
             return;
         }
-        NonVolatileStatus s = p.getNonVolatileStatus();
+
+        // HP & Level
+        features.add((double) pokemon.getCurrentStat(Stat.HP) / pokemon.getInitialStat(Stat.HP));
+        features.add((double) pokemon.getLevel() / 100.0);
         
-        // 1. Incapacitated (Sleep/Freeze)
-        features.add((s == NonVolatileStatus.SLEEP || s == NonVolatileStatus.FREEZE) ? 1.0 : 0.0);
+        // Stat Multipliers (Normalized from -6 to +6 range)
+        features.add((double) pokemon.getStatMultiplier(Stat.ATK) / 6.0);    
+        features.add((double) pokemon.getStatMultiplier(Stat.DEF) / 6.0);
+        features.add((double) pokemon.getStatMultiplier(Stat.SPD) / 6.0);
+        features.add((double) pokemon.getStatMultiplier(Stat.SPATK) / 6.0);
+        features.add((double) pokemon.getStatMultiplier(Stat.SPDEF) / 6.0);
+        features.add((double) pokemon.getStatMultiplier(Stat.ACC) / 6.0);
+        features.add((double) pokemon.getStatMultiplier(Stat.EVASIVE) / 6.0);
         
-        // 2. Slowed/Miss (Paralysis)
-        features.add(s == NonVolatileStatus.PARALYSIS ? 1.0 : 0.0);
+        // Height
+        Height height = pokemon.getHeight();
+        features.add(height == Height.IN_AIR ? 1.0 : 0.0);
+        features.add(height == Height.UNDERGROUND ? 1.0 : 0.0);  
+        features.add(height == Height.NONE ? 1.0 : 0.0);
         
-        // 3. DoT (Burn/Poison/Toxic)
-        features.add((s == NonVolatileStatus.BURN || s == NonVolatileStatus.POISON || s == NonVolatileStatus.TOXIC) ? 1.0 : 0.0);
+        // Non-volatile Status
+        NonVolatileStatus status = pokemon.getNonVolatileStatus();
+        features.add(status == NonVolatileStatus.SLEEP ? 1.0 : 0.0);
+        features.add(status == NonVolatileStatus.POISON ? 1.0 : 0.0);
+        features.add(status == NonVolatileStatus.BURN ? 1.0 : 0.0);
+        features.add(status == NonVolatileStatus.PARALYSIS ? 1.0 : 0.0);
+        features.add(status == NonVolatileStatus.FREEZE ? 1.0 : 0.0);
+        features.add(status == NonVolatileStatus.TOXIC ? 1.0 : 0.0);
+        features.add(status == NonVolatileStatus.NONE ? 1.0 : 0.0);
+        
+        // Volatile Flags
+        features.add(pokemon.getFlag(Flag.CONFUSED) ? 1.0 : 0.0);
+        features.add(pokemon.getFlag(Flag.TRAPPED) ? 1.0 : 0.0);
+        features.add(pokemon.getFlag(Flag.FLINCHED) ? 1.0 : 0.0);
+        features.add(pokemon.getFlag(Flag.FOCUS_ENERGY) ? 1.0 : 0.0);
+        features.add(pokemon.getFlag(Flag.SEEDED) ? 1.0 : 0.0);
+        
+        // Types (One-Hot)
+        Type type1 = pokemon.getCurrentType1();
+        Type type2 = pokemon.getCurrentType2();
+        for (Type t : Type.values()) {
+            features.add((type1 == t || type2 == t) ? 1.0 : 0.0);
+        }
+        
+        // Misc
+        features.add(pokemon.getActiveMoveView() != null ? 1.0 : 0.0);
+        features.add(pokemon.getSubstitute() != null ? 1.0 : 0.0);
+        features.add(pokemon.getStatsUnchangeable() ? 1.0 : 0.0);
+    }
+
+    private void addMoveFeatures(List<Double> features, BattleView state, MoveView action) {
+        if (action == null) {
+            // Pad 30 features
+            for(int i=0; i<30; i++) features.add(0.0);
+            return;
+        }
+
+        features.add(action.getPower() != null ? (double) action.getPower() / 200.0 : 0.0);
+        features.add(action.getAccuracy() != null ? (double) action.getAccuracy() / 100.0 : 1.0);
+        features.add((double) action.getPP() / 40.0);
+        features.add((double) action.getPriority());
+        features.add((double) action.getCriticalHitRatio());
+        
+        features.add(action.getCategory() == Move.Category.PHYSICAL ? 1.0 : 0.0);
+        features.add(action.getCategory() == Move.Category.SPECIAL ? 1.0 : 0.0);
+        features.add(action.getCategory() == Move.Category.STATUS ? 1.0 : 0.0);
+        
+        // Move Type
+        Type moveType = action.getType();
+        for (Type t : Type.values()) {
+            features.add(moveType == t ? 1.0 : 0.0);
+        }
+        
+        // Heights
+        features.add(action.getCanHitHeights().contains(Height.IN_AIR) ? 1.0 : 0.0);
+        features.add(action.getCanHitHeights().contains(Height.UNDERGROUND) ? 1.0 : 0.0);
+        features.add(action.getCanHitHeights().contains(Height.NONE) ? 1.0 : 0.0);
+        
+        // Effectiveness
+        PokemonView opponent = state.getTeam2View().getActivePokemonView();
+        if (opponent != null && action.getPower() != null && action.getPower() > 0) {
+            double effectiveness = calculateTypeEffectiveness(action.getType(), 
+                opponent.getCurrentType1(), opponent.getCurrentType2());
+            features.add(effectiveness / 4.0); // Normalize
+        } else {
+            features.add(0.25); // Neutral (1.0 / 4.0)
+        }
+    }
+
+    private void addTeamFeatures(List<Double> features, TeamView team) {
+        int aliveCount = 0;
+        double totalHealth = 0.0;
+        double maxHealth = 0.0;
+        
+        for (int i = 0; i < team.size(); i++) {
+            PokemonView p = team.getPokemonView(i);
+            if (!p.hasFainted()) {
+                aliveCount++;
+                totalHealth += p.getCurrentStat(Stat.HP);
+                maxHealth += p.getInitialStat(Stat.HP);
+            }
+        }
+        
+        features.add((double) aliveCount / 6.0);
+        features.add(maxHealth > 0 ? totalHealth / maxHealth : 0.0);
+        features.add((double) team.getNumLightScreenTurnsRemaining() / 8.0);
+        features.add((double) team.getNumReflectTurnsRemaining() / 8.0);
+    }
+
+    private void addBattleFeatures(List<Double> features, BattleView state) {       
+        features.add(state.isOver() ? 1.0 : 0.0);
     }
 
     private double calculateTypeEffectiveness(Type moveType, Type defenderType1, Type defenderType2) {
